@@ -5,6 +5,8 @@
 #include<string>
 #include <Eigen/Dense>
 
+class Euler_angle;
+
 // 全局控制参数
 int brightness_delta = -30;
 int brightness_threshold = 120;
@@ -734,9 +736,8 @@ int main() {
          0, 100000, 0,
          0, 0, 100000;
 
-
     //video
-    cv::VideoCapture cap("E.mp4");
+    cv::VideoCapture cap("../2.mp4",cv::CAP_FFMPEG);
 
 
     if(!cap.isOpened()){
