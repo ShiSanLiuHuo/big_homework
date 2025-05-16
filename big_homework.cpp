@@ -4,6 +4,9 @@
 #include<cmath>
 #include<string>
 #include <Eigen/Dense>
+#include<arpa/inet.h>
+#include<sys/socket.h>
+#include <unistd.h>
 
 class Euler_angle;
 
@@ -14,8 +17,8 @@ int iLowH = 85, iHighH = 120;
 int iLowS = 40, iHighS = 255;
 int iLowV = 100, iHighV = 255;
 cv::Mat image, hsv;
-cv::Mat kernel1 = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5,5));
-cv::Mat kernel2 = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3,3));
+cv::Mat kernel1 = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3,3));  //change!!!!!
+cv::Mat kernel2 = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(1,1));
 
 std::vector<cv::Mat> rvec_list,tvec_list;
 std::vector<Euler_angle> Euler_angle_list;
@@ -34,19 +37,19 @@ int m = 1;      //观测量数量
 Eigen::MatrixXd A(n,n), H(m,n), Q(n,n), R(m,m),P(n,n);
 Eigen::VectorXd x0(n);
 
-cv::Point2f prev_center;
+
     
 
 int light_min_area = 100; //灯条最小面积
 float light_max_angle = 60.0f; //灯条最大的倾斜角
 int light_min_size = 5.0;
 float light_contour_min_solidity = 0.3; //灯条最小凸度
-float light_max_ratio = 0.6; //灯条最大长宽比
-float light_max_y_diffence_ratio = 0.7;
-float light_min_x_diffence_ratio =0.7;
+float light_max_ratio = 0.8; //灯条最大长宽比
+float light_max_y_diffence_ratio = 0.5;
+float light_min_x_diffence_ratio =0.5;
 float light_max_angle_diffence = 15.0;
 float light_max_height_diffence_ratio = 0.2;
-float armor_max_aspect_ratio = 5.0;
+float armor_max_aspect_ratio = 2.5;
 float armor_min_aspect_ratio = 1.0;
 
 
@@ -70,8 +73,10 @@ enum MessageType {
     TRANSFORM = 0x1981,
     TRANSFORM_REQUEST = 0x1982
 };
-const unsigned short END_SYMBOL = 0x0721;
-    
+const unsigned short END_SYMBOL = 0x000721;
+const unsigned short START_SYMBOL = 0x0D00;
+
+#pragma pack(push,1)
 struct MessageBuffer {
     unsigned short Start = 0x0D00;                // 0x0D00
     unsigned short MessageType;
@@ -82,13 +87,74 @@ struct MessageBuffer {
     unsigned char Data[10218]={0};
     unsigned short End = END_SYMBOL;                       // 0x0721
 };
+#pragma pack(pop)
 
-bool isMessageComplete (const MessageBuffer& mes){
-    return (mes.Start == 0x0D00) && (mes.End == END_SYMBOL) && (mes.DataLength <= sizeof(mes.Data));
+void message_to_network(MessageBuffer &msg){
+    msg.Start = htons(msg.Start);
+    msg.MessageType = htons(msg.MessageType);
+    msg.DataID = htonl(msg.DataID);
+    msg.DataTotalLength = htonl(msg.DataTotalLength);
+    msg.Offset = htonl(msg.Offset);
+    msg.DataLength = htonl(msg.DataLength);
+    msg.End = htons(msg.End);
 }
-//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-void runreceive(){}
 
+void network_to_message(MessageBuffer &msg){
+    msg.Start = ntohs(msg.Start);
+    msg.MessageType = ntohs(msg.MessageType);
+    msg.DataID = ntohl(msg.DataID);
+    msg.DataTotalLength = ntohl(msg.DataTotalLength);
+    msg.Offset = ntohl(msg.Offset);
+    msg.DataLength = ntohl(msg.DataLength);
+    msg.End = ntohl(msg.End);
+}
+
+std::map<unsigned int, std::vector<unsigned char>> data_temp;  // 临时存储分块数据
+
+unsigned char* receive_and_decode(MessageBuffer &msg);
+
+// 接收数据并重组
+unsigned char* receive_data(int sock) {
+    MessageBuffer msg;
+
+    // 接收完整消息?
+    if (recv(sock, &msg, sizeof(msg), 0) != sizeof(msg)) {
+        return nullptr; 
+    }
+
+    // 反序列化并验证
+    network_to_message(msg);
+
+    if (msg.Start != START_SYMBOL || msg.End != END_SYMBOL) {
+        return nullptr;  
+    }
+
+    // 调用分块重组函数
+    return receive_and_decode(msg);
+}
+
+// 重组分块数据
+unsigned char* receive_and_decode(MessageBuffer &msg) {
+    unsigned int data_id = msg.DataID;
+    unsigned int offset = msg.Offset;
+    unsigned int length = msg.DataLength;
+    unsigned int total_length = msg.DataTotalLength;
+
+    if (data_temp.find(data_id) == data_temp.end()) {
+        data_temp[data_id] = std::vector<unsigned char>(total_length);
+    }
+
+    std::memcpy(data_temp[data_id].data() + offset, msg.Data, length);
+
+    if (offset + length >= total_length) {
+        unsigned char *data = new unsigned char[total_length];
+        std::memcpy(data, data_temp[data_id].data(), total_length);
+        data_temp.erase(data_id);
+        return data;
+    } else {
+        return nullptr;  
+    }
+}
 
 cv::Mat calculateLinearVelocity(
     const cv::Mat& prev_pos,
@@ -124,6 +190,7 @@ cv::Mat findRotationCenter(
         }
 
         cv::Mat c0 = omega.cross(v)/omega_squared;
+        std::cout << cv::norm(c0) << std::endl;
         return p - c0;
     }
 
@@ -296,22 +363,6 @@ float distance(const cv::Point2f& p1,const cv::Point2f& p2){
     return sqrt(x_diffence*x_diffence + y_diffence*y_diffence);
 }
 
-cv::Mat adjustBrightness(const cv::Mat& hsv_image, int delta) {
-    if (hsv_image.empty()) {
-        std::cerr << "HSV image is empty!" << std::endl;
-        return cv::Mat();
-    }
-
-    std::vector<cv::Mat> channels;
-    cv::split(hsv_image.clone(), channels); 
-
-    // 使用饱和加法确保亮度值在[0,255]范围内
-    cv::add(channels[2], delta, channels[2], cv::noArray(), CV_8U);
-
-    cv::Mat adjusted_hsv;
-    cv::merge(channels, adjusted_hsv);
-    return adjusted_hsv;
-}
 
 cv::Mat splitColors(const cv::Mat& hsv_image) {
     cv::Mat mask;
@@ -326,17 +377,15 @@ cv::Mat morphologyImage(cv::Mat mask) {
     cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel1);
     cv::dilate(mask, mask, kernel2);
 
-    // cv::Mat horizontal_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9,1));
-    // cv::dilate(mask, mask, horizontal_kernel);
+    //cv::Mat horizontal_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1,7));
+    //cv::dilate(mask, mask, horizontal_kernel);
 
     return mask;
 }
 
 void processImage(std::vector<std::vector<cv::Point>>& contours) {
-    cv::Mat adjusted_hsv = adjustBrightness(hsv, brightness_delta);
-    if (adjusted_hsv.empty()) return;
 
-    cv::Mat color_mask = splitColors(adjusted_hsv);
+    cv::Mat color_mask = splitColors(hsv);
     cv::Mat processed_mask = morphologyImage(color_mask);
 
     cv::findContours(processed_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
@@ -344,6 +393,8 @@ void processImage(std::vector<std::vector<cv::Point>>& contours) {
     cv::Mat result = image.clone();
     cv::drawContours(result, contours, -1, cv::Scalar(0,255,0), 2);
 
+
+    cv::imshow("result",result);
 }
 
 void findlight(const std::vector<std::vector<cv::Point>>& contours, std::vector<LightDescriptor>& lights) {
@@ -420,8 +471,8 @@ std::vector<ArmorDescriptor> matchArmor( std::vector<LightDescriptor> lights){
             float ratio = dis / meanLen;
 
             //筛选
-            if( //yDiffence_ratio > light_max_y_diffence_ratio ||
-                //xDiffence_ratio < light_min_x_diffence_ratio || 
+            if( yDiffence_ratio > light_max_y_diffence_ratio ||
+                xDiffence_ratio < light_min_x_diffence_ratio || 
                ratio > armor_max_aspect_ratio ||
                ratio < armor_min_aspect_ratio ){
                 continue;
@@ -434,6 +485,8 @@ std::vector<ArmorDescriptor> matchArmor( std::vector<LightDescriptor> lights){
     }
     return armors;
 }
+
+std::vector<cv::Point2f> prev_center_list;
 
 void addressImage(const cv::Mat& Image){
     image = Image.clone();
@@ -460,7 +513,7 @@ void addressImage(const cv::Mat& Image){
         }
     }
 
-
+    cv::imshow("result1",result1);
 
     std::vector<ArmorDescriptor> _armor = matchArmor(lights);
     if(_armor.empty()){
@@ -473,16 +526,18 @@ void addressImage(const cv::Mat& Image){
     int best_idx = 0;
 
     if (!_armor.empty()) {
-        
+        cv::Point2f prev_center;
         for (size_t i = 0; i < _armor.size(); ++i) {
             cv::Point2f curr_center = (_armor[i].leftLight.center + _armor[i].rightLight.center) * 0.5f;
-            float dist = cv::norm(curr_center - prev_center);
+            float dist = cv::norm(curr_center - prev_center_list.back());
             if (dist < min_dist) {
                 min_dist = dist;
                 best_idx = i;
             }
         }
         prev_center = (_armor[best_idx].leftLight.center + _armor[best_idx].rightLight.center) * 0.5f;
+        prev_center_list.push_back(prev_center);
+
     }
     cv::Mat _debugImg = image.clone(); 
     // 定义装甲板在3D空间中的实际坐标 左上、右上、右下、左下
@@ -496,8 +551,9 @@ void addressImage(const cv::Mat& Image){
     
     std::vector<cv::Point> contour;
     for (int j = 0; j < 4; j++) {
-        contour.emplace_back(_armor[best_idx].vertex[j]);
+        contour.emplace_back(_armor[best_idx].vertex[j]);  
     }
+    cv::polylines(_debugImg, contour, true, cv::Scalar(0, 255, 0), 2);
 
     // 图像点
     std::vector<cv::Point2f> image_points;
@@ -713,6 +769,33 @@ class Kalman {
     };
 
 
+void send_rotation_center(int sock, const cv::Mat& rotation_center) {
+    MessageBuffer msg;
+    msg.MessageType = TRANSFORM;  
+    msg.DataID = 1;               // 固定 ID
+    
+    // 字节流
+    double x = rotation_center.at<double>(0);
+    double y = rotation_center.at<double>(1);
+    double z = rotation_center.at<double>(2);
+    
+    // 填充 Data 字段
+    std::memcpy(msg.Data, &x, sizeof(double));
+    std::memcpy(msg.Data + 8, &y, sizeof(double));
+    std::memcpy(msg.Data + 16, &z, sizeof(double));
+    
+    // 设置协议字段
+    msg.DataTotalLength = 24;
+    msg.DataLength = 24;
+    msg.Offset = 0;
+    
+    // 序列化并发送
+    message_to_network(msg);
+    if (send(sock, &msg, sizeof(msg), 0) != sizeof(msg)) {
+        std::cerr << "Failed to send rotation center" << std::endl;
+    }
+}
+
 
 int main() {
 //kalman
@@ -736,8 +819,33 @@ int main() {
          0, 100000, 0,
          0, 0, 100000;
 
+
+// //socket
+//     int client_sock = socket(AF_INET, SOCK_STREAM, 0);
+//     if (client_sock == -1) {
+//         std::cerr << "Socket creation failed" << std::endl;
+//         return -1;
+//     }
+    
+//     sockaddr_in server_addr{};
+//     server_addr.sin_family = AF_INET;
+//     server_addr.sin_port = htons(8080);  // 服务端端口
+//     inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr); // 服务端IP
+    
+//     if (connect(client_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+//         std::cerr << "Connection failed" << std::endl;
+//         close(client_sock);
+//         return -1;
+//     }
+
+
+
+
+
+
+
     //video
-    cv::VideoCapture cap("../2.mp4",cv::CAP_FFMPEG);
+    cv::VideoCapture cap("../10.mp4",cv::CAP_FFMPEG);
 
 
     if(!cap.isOpened()){
@@ -752,7 +860,9 @@ int main() {
 
     cap >> prevFrame;
     if(!prevFrame.empty()){
+        cv::Point2f prev_center;
         prev_center = cv::Point2f(prevFrame.cols/2,prevFrame.rows/2);
+        prev_center_list.push_back(prev_center);
     }
     addressImage(prevFrame);
     while(true){
@@ -800,8 +910,10 @@ int main() {
 
             // after kalman
             cv::Mat filtered_RotationCenter = (cv::Mat_<double>(3,1) << filtered_x, filtered_y, filtered_z);
+            //send_rotation_center(client_sock, filtered_RotationCenter);
+
             RotationCenter_list.push_back(filtered_RotationCenter);
-            
+            std::cout << "x: " << filtered_x << std::endl << "y: " << filtered_y << std::endl << "z: " <<filtered_z << std::endl <<std::endl << std::endl; 
         }    
 
     }
@@ -812,5 +924,6 @@ int main() {
     delete kf_z;
     cv::waitKey(0);
     cap.release();
+    //close(client_sock);
     return 0;
 }
