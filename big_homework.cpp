@@ -563,7 +563,7 @@ void addressImage(const cv::Mat& Image){
     int best_idx = 0;
 
     if (!_armor.empty()) {
-        cv::Point2f prev_center;
+        cv::Point2f prev_center = prev_center_list.back();
         for (size_t i = 0; i < _armor.size(); ++i) {
             cv::Point2f curr_center = (_armor[i].leftLight.center + _armor[i].rightLight.center) * 0.5f;
             float dist = cv::norm(curr_center - prev_center_list.back());
