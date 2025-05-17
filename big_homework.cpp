@@ -119,16 +119,19 @@ unsigned char* receive_data(int sock) {
     ssize_t total_received = 0;
     char* buffer = reinterpret_cast<char*>(&msg);
 
-    // 循环接收直至收满整个MessageBuffer结构
+    // 循环接收完整报文
     while (total_received < sizeof(MessageBuffer)) {
-        ssize_t received = recv(sock, buffer + total_received, 
+        ssize_t received = recv(sock, buffer + total_received,
                               sizeof(MessageBuffer) - total_received, 0);
-                              
         if (received <= 0) {
             if (received == 0) {
                 std::cerr << "Connection closed by peer" << std::endl;
             } else {
-                perror("recv error");
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    std::cerr << "Receive timeout" << std::endl;
+                } else {
+                    perror("recv error");
+                }
             }
             close(sock);
             return nullptr;
@@ -138,7 +141,7 @@ unsigned char* receive_data(int sock) {
 
     // 验证数据完整性
     if (total_received != sizeof(MessageBuffer)) {
-        std::cerr << "Incomplete message received (" 
+        std::cerr << "Incomplete header received (" 
                 << total_received << "/" << sizeof(MessageBuffer) 
                 << " bytes)" << std::endl;
         return nullptr;
@@ -149,7 +152,17 @@ unsigned char* receive_data(int sock) {
 
     // 验证协议标识
     if (msg.Start != START_SYMBOL || msg.End != END_SYMBOL) {
-        std::cerr << "Invalid protocol markers" << std::endl;
+        std::cerr << "Invalid protocol markers: "
+                << std::hex << msg.Start << " vs " << START_SYMBOL
+                << ", " << msg.End << " vs " << END_SYMBOL 
+                << std::dec << std::endl;
+        return nullptr;
+    }
+
+    // 验证数据长度有效性
+    if (msg.DataTotalLength > sizeof(msg.Data)) {
+        std::cerr << "Invalid DataTotalLength: " << msg.DataTotalLength 
+                << " (max " << sizeof(msg.Data) << ")" << std::endl;
         return nullptr;
     }
 
@@ -854,7 +867,7 @@ int main() {
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(8080);  // 服务端端口
-    inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr); // 服务端IP
+    inet_pton(AF_INET, "10.2.20.28", &server_addr.sin_addr); // 服务端IP
     
     if (connect(client_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         std::cerr << "Connection failed" << std::endl;
