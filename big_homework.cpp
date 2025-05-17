@@ -106,7 +106,7 @@ void network_to_message(MessageBuffer &msg){
     msg.DataTotalLength = ntohl(msg.DataTotalLength);
     msg.Offset = ntohl(msg.Offset);
     msg.DataLength = ntohl(msg.DataLength);
-    msg.End = ntohl(msg.End);
+    msg.End = ntohs(msg.End);
 }
 
 std::map<unsigned int, std::vector<unsigned char>> data_temp;  // 临时存储分块数据
@@ -116,17 +116,41 @@ unsigned char* receive_and_decode(MessageBuffer &msg);
 // 接收数据并重组
 unsigned char* receive_data(int sock) {
     MessageBuffer msg;
+    ssize_t total_received = 0;
+    char* buffer = reinterpret_cast<char*>(&msg);
 
-    // 接收完整消息?
-    if (recv(sock, &msg, sizeof(msg), 0) != sizeof(msg)) {
-        return nullptr; 
+    // 循环接收直至收满整个MessageBuffer结构
+    while (total_received < sizeof(MessageBuffer)) {
+        ssize_t received = recv(sock, buffer + total_received, 
+                              sizeof(MessageBuffer) - total_received, 0);
+                              
+        if (received <= 0) {
+            if (received == 0) {
+                std::cerr << "Connection closed by peer" << std::endl;
+            } else {
+                perror("recv error");
+            }
+            close(sock);
+            return nullptr;
+        }
+        total_received += received;
     }
 
-    // 反序列化并验证
+    // 验证数据完整性
+    if (total_received != sizeof(MessageBuffer)) {
+        std::cerr << "Incomplete message received (" 
+                << total_received << "/" << sizeof(MessageBuffer) 
+                << " bytes)" << std::endl;
+        return nullptr;
+    }
+
+    // 反序列化网络字节序
     network_to_message(msg);
 
+    // 验证协议标识
     if (msg.Start != START_SYMBOL || msg.End != END_SYMBOL) {
-        return nullptr;  
+        std::cerr << "Invalid protocol markers" << std::endl;
+        return nullptr;
     }
 
     // 调用分块重组函数
@@ -792,7 +816,7 @@ void send_rotation_center(int sock, const cv::Mat& rotation_center) {
     // 序列化并发送
     message_to_network(msg);
     if (send(sock, &msg, sizeof(msg), 0) != sizeof(msg)) {
-        std::cerr << "Failed to send rotation center" << std::endl;
+        std::cerr << "Failed to send rotation center!!!!!!" << std::endl << std::endl;
     }
 }
 
@@ -820,65 +844,88 @@ int main() {
          0, 0, 100000;
 
 
-// //socket
-//     int client_sock = socket(AF_INET, SOCK_STREAM, 0);
-//     if (client_sock == -1) {
-//         std::cerr << "Socket creation failed" << std::endl;
-//         return -1;
-//     }
+//socket
+    int client_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (client_sock == -1) {
+        std::cerr << "Socket creation failed" << std::endl;
+        return -1;
+    }
     
-//     sockaddr_in server_addr{};
-//     server_addr.sin_family = AF_INET;
-//     server_addr.sin_port = htons(8080);  // 服务端端口
-//     inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr); // 服务端IP
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(8080);  // 服务端端口
+    inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr); // 服务端IP
     
-//     if (connect(client_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-//         std::cerr << "Connection failed" << std::endl;
-//         close(client_sock);
-//         return -1;
-//     }
-
-
-
-
+    if (connect(client_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+        std::cerr << "Connection failed" << std::endl;
+        close(client_sock);
+        return -1;
+    }
 
 
 
     //video
-    cv::VideoCapture cap("../10.mp4",cv::CAP_FFMPEG);
+    //cv::VideoCapture cap("../10.mp4",cv::CAP_FFMPEG);
 
 
-    if(!cap.isOpened()){
-        std::cerr << "Video not opened!!!" << std::endl;
-        return -1;
-    }
+    // if(!cap.isOpened()){
+    //     std::cerr << "Video not opened!!!" << std::endl;
+    //     return -1;
+    // }
     
 
-    cv::Mat prevFrame, nextFrame;
+    //cv::Mat prevFrame, nextFrame;
     //!!
-    cv::Mat diffFrame;
+    //cv::Mat diffFrame;
 
-    cap >> prevFrame;
-    if(!prevFrame.empty()){
-        cv::Point2f prev_center;
-        prev_center = cv::Point2f(prevFrame.cols/2,prevFrame.rows/2);
-        prev_center_list.push_back(prev_center);
-    }
-    addressImage(prevFrame);
+    //cap >> prevFrame;
+    
+    //addressImage(prevFrame);
     while(true){
-        cap >> nextFrame;
-        if(nextFrame.empty())   break;
-        addressImage(nextFrame);
+        //cap >> nextFrame;
+        //if(nextFrame.empty())   break;
 
-        if(tvec_list.size() >= 2 && rvec_list.size() >= 2){
-            cv::Mat linear_velocity = calculateLinearVelocity( tvec_list.at(tvec_list.size() - 2) , tvec_list.back() );
-            linear_velocity_list.push_back(linear_velocity);
+        
 
-            cv::Mat omega = calculateAngleVelocity( rvec_list.at(rvec_list.size()-2), rvec_list.back() ); 
-            omega_list.push_back(omega);
+        unsigned char* img_data = receive_data(client_sock);
+        if (!img_data) {
+            std::cerr << "Failed to receive image data" << std::endl;
+            continue;
+        }
 
+
+        // 获取实际数据长度
+        MessageBuffer tmp_msg;
+        network_to_message(tmp_msg);
+        int img_length = ntohl(tmp_msg.DataTotalLength);
+        
+
+        // 解码为OpenCV Mat
+        cv::Mat img = cv::imdecode(cv::Mat(1, img_length, CV_8UC1, img_data), cv::IMREAD_COLOR);
+        delete[] img_data; // 释放内存
+
+        if (img.empty()) {
+            std::cerr << "Decoded image is empty" << std::endl;
+            continue;
+        }
+        if(prev_center_list.empty()){
+            cv::Point2f prev_center;
+            prev_center = cv::Point2f(img.cols/2,img.rows/2);
+            prev_center_list.push_back(prev_center);
+        }
+
+        // 处理当前帧
+        addressImage(img);
+
+        // 计算并发送旋转中心
+        if (tvec_list.size() >= 2 && rvec_list.size() >= 2) {
+            // 计算线速度和角速度
+            cv::Mat linear_velocity = calculateLinearVelocity(tvec_list[tvec_list.size()-2], tvec_list.back());
+            cv::Mat omega = calculateAngleVelocity(rvec_list[rvec_list.size()-2], rvec_list.back());
+            
+            // 计算旋转中心
             cv::Mat RotationCenter = findRotationCenter(tvec_list.back(), omega, linear_velocity);
-
+            
             // position
             double x = RotationCenter.at<double>(0);
             double y = RotationCenter.at<double>(1);
@@ -910,12 +957,14 @@ int main() {
 
             // after kalman
             cv::Mat filtered_RotationCenter = (cv::Mat_<double>(3,1) << filtered_x, filtered_y, filtered_z);
-            //send_rotation_center(client_sock, filtered_RotationCenter);
+            send_rotation_center(client_sock, filtered_RotationCenter);
 
             RotationCenter_list.push_back(filtered_RotationCenter);
-            std::cout << "x: " << filtered_x << std::endl << "y: " << filtered_y << std::endl << "z: " <<filtered_z << std::endl <<std::endl << std::endl; 
-        }    
-
+            std::cout << "x: " << filtered_x << std::endl << "y: " << filtered_y << std::endl << "z: " <<filtered_z << std::endl <<std::endl << std::endl;
+            // 发送数据
+            send_rotation_center(client_sock, filtered_RotationCenter);
+        }
+        
     }
 
     
@@ -923,7 +972,7 @@ int main() {
     delete kf_y;
     delete kf_z;
     cv::waitKey(0);
-    cap.release();
-    //close(client_sock);
+    //cap.release();
+    close(client_sock);
     return 0;
 }
