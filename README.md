@@ -5,5 +5,5 @@
 ## math formula
 
 ### findRotationCenter
-#### v = w x v;
+#### v = w x r;
 #### vector triple product
