@@ -228,7 +228,7 @@ cv::Mat findRotationCenter(
 
         cv::Mat c0 = omega.cross(v)/omega_squared;
         std::cout << cv::norm(c0) << std::endl;
-        return p - c0;
+        return p + c0;
     }
 
 
@@ -400,7 +400,7 @@ float distance(const cv::Point2f& p1,const cv::Point2f& p2){
     return sqrt(x_diffence*x_diffence + y_diffence*y_diffence);
 }
 
-
+//RGB better
 cv::Mat splitColors(const cv::Mat& hsv_image) {
     cv::Mat mask;
     cv::inRange(hsv_image, 
@@ -970,7 +970,7 @@ int main() {
 
             // after kalman
             cv::Mat filtered_RotationCenter = (cv::Mat_<double>(3,1) << filtered_x, filtered_y, filtered_z);
-            send_rotation_center(client_sock, filtered_RotationCenter);
+            //send_rotation_center(client_sock, filtered_RotationCenter);
 
             RotationCenter_list.push_back(filtered_RotationCenter);
             std::cout << "x: " << filtered_x << std::endl << "y: " << filtered_y << std::endl << "z: " <<filtered_z << std::endl <<std::endl << std::endl;
